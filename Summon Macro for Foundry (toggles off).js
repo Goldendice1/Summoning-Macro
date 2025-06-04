@@ -508,58 +508,9 @@ async function importMonster(html) {
         }
     }
 
-    // Create a Buff to Track Duration
-    let durationBuff = {
-        type: "buff", 
-        name: "Active Summon Spell", 
-        img: "icons/magic/symbols/runes-triangle-blue.webp",
-        system: { 
-            buffType: "spell", 
-            duration: { units: "round", value: `${casterLevel}`, end: "initiative" }, 
-            hideFromToken: true, 
-            active: true,
-            scriptCalls: [
-                new pf1.components.ItemScriptCall({
-                    type: "script",
-                    category: "toggle",
-                    value: `
-if (!state) {
-    // Only prompt once per expiration
-    if (!item.getFlag("world", "summonDeletePrompted")) {
-        let actorId = item.getFlag("world", "summonedActorId");
-        if (!actorId) {
-            ChatMessage.create({content: "<p>No summon to delete.</p>"});
-            item.delete();
-            return;
-        }
-        // Create a chat card with a delete button
-        let chatContent = \`
-        <div class="pf1 chat-card">
-            <header class="card-header flexrow">
-                <h3 class="actor-name">Summon Expired</h3>
-            </header>
-            <div class="result-text">
-                <p>The summon duration has expired. <button data-action="delete-summon" data-actor-id="\${actorId}" data-item-id="\${item.id}">Delete Summon</button></p>
-            </div>
-        </div>\`;
-        ChatMessage.create({content: chatContent});
-        await item.setFlag("world", "summonDeletePrompted", true);
-    }
-}
-`
-                })
-            ]
-        },
-        flags: {
-            world: {
-                summonedActorId: createdMonster.id
-            }
-        }
-    };
-    await summonerActor.createEmbeddedDocuments("Item", [durationBuff]);
-
     // Wait for summoner to spawn the rolled number of tokens on the canvas
     console.log("Spawning summons");
+    let firstSummonedToken = null;
     while (gNumSpawned < gNeedSpawn) {
         ui.notifications.info(`Click spawn location for ${createdMonster.name} within ${range} ft of summoner (${gNumSpawned} of ${gNeedSpawn})`);
         let portal = new Portal();
@@ -578,13 +529,74 @@ if (!state) {
         await portal.pick();
         console.log("Portal pick completed");
 
-        await portal.spawn();
+        const spawnedTokens = await portal.spawn();
         console.log("Portal spawn completed");
+
+        // Save the first summoned token
+        if (gNumSpawned === 0 && spawnedTokens && spawnedTokens.length > 0) {
+            firstSummonedToken = spawnedTokens[0];
+        } else if (gNumSpawned === 0 && canvas.tokens.placeables) {
+            // Fallback: try to find the first token for this actor
+            firstSummonedToken = canvas.tokens.placeables.find(t => t.actor && t.actor.id === createdMonster.id);
+        }
 
         gNumSpawned++;
         console.log("Spawned:", gNumSpawned);
     }
     ui.notifications.info("Done spawning summons!");
+
+    // Apply the duration buff to the summoner (caster) instead of the summoned monster
+    if (summonerActor) {
+        let durationBuff = {
+            type: "buff", 
+            name: "Active Summon Spell", 
+            img: "icons/magic/symbols/runes-triangle-blue.webp",
+            system: { 
+                buffType: "spell", 
+                duration: { units: "round", value: casterLevel, end: "initiative" }, 
+                hideFromToken: true, 
+                active: true,
+                scriptCalls: [
+                    {
+                        type: "script",
+                        category: "toggle",
+                        value: `
+if (!state) {
+    // Only prompt once per expiration
+    if (!item.getFlag("world", "summonDeletePrompted")) {
+        let actorId = item.getFlag("world", "summonedActorId");
+        if (!actorId) {
+            ChatMessage.create({content: '<p>No summon to delete.</p>'});
+            item.delete();
+            return;
+        }
+        // Create a chat card with a delete button
+        let chatContent = '<div class="pf1 chat-card">' +
+            '<header class="card-header flexrow">' +
+            '<h3 class="actor-name">Summon Expired</h3>' +
+            '</header>' +
+            '<div class="result-text">' +
+            '<p>The summon duration has expired. <button data-action="delete-summon" data-actor-id="' + actorId + '" data-item-id="' + item.id + '">Delete Summon</button></p>' +
+            '</div>' +
+            '</div>';
+        ChatMessage.create({content: chatContent});
+        await item.setFlag("world", "summonDeletePrompted", true);
+    }
+}
+`
+                    }
+                ]
+            },
+            flags: {
+                world: {
+                    summonedActorId: createdMonster.id
+                }
+            }
+        };
+        await summonerActor.createEmbeddedDocuments("Item", [durationBuff]);
+    } else {
+        ui.notifications.warn("Could not find summoner to apply duration buff.");
+    }
 
     // After all tokens are spawned
     if (game.combat) {
@@ -669,11 +681,18 @@ if (!window._summonDeleteHookId) {
             // Delete the actor
             let monster = game.actors.get(actorId);
             if (monster) await monster.delete();
-            // Delete the buff item from the summoner
+            // Delete the buff item from the summoner (GM can always do this)
             let summoner = game.actors.find(a => a.items.get(itemId));
             if (summoner) {
                 let item = summoner.items.get(itemId);
-                if (item) await item.delete();
+                if (item) {
+                    // If GM, use GM privileges to delete the item
+                    if (game.user.isGM) {
+                        await Item.deleteDocuments([itemId], {parent: summoner});
+                    } else {
+                        await item.delete();
+                    }
+                }
             }
             ChatMessage.create({content: "<p>Summon deleted.</p>"});
         });
