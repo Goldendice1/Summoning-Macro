@@ -545,57 +545,53 @@ async function importMonster(html) {
     }
     ui.notifications.info("Done spawning summons!");
 
-    // Apply the duration buff to the summoner (caster) instead of the summoned monster
-    if (summonerActor) {
-        let durationBuff = {
-            type: "buff", 
-            name: "Active Summon Spell", 
-            img: "icons/magic/symbols/runes-triangle-blue.webp",
-            system: { 
-                buffType: "spell", 
-                duration: { units: "round", value: casterLevel, end: "initiative" }, 
-                hideFromToken: true, 
-                active: true,
-                scriptCalls: [
-                    {
-                        type: "script",
-                        category: "toggle",
-                        value: `
-if (!state) {
-    // Only prompt once per expiration
-    if (!item.getFlag("world", "summonDeletePrompted")) {
-        let actorId = item.getFlag("world", "summonedActorId");
-        if (!actorId) {
-            ChatMessage.create({content: '<p>No summon to delete.</p>'});
-            item.delete();
-            return;
-        }
-        // Create a chat card with a delete button
-        let chatContent = '<div class="pf1 chat-card">' +
-            '<header class="card-header flexrow">' +
-            '<h3 class="actor-name">Summon Expired</h3>' +
-            '</header>' +
-            '<div class="result-text">' +
-            '<p>The summon duration has expired. <button data-action="delete-summon" data-actor-id="' + actorId + '" data-item-id="' + item.id + '">Delete Summon</button></p>' +
-            '</div>' +
-            '</div>';
-        ChatMessage.create({content: chatContent});
-        await item.setFlag("world", "summonDeletePrompted", true);
-    }
-}
-`
-                    }
-                ]
-            },
-            flags: {
-                world: {
-                    summonedActorId: createdMonster.id
-                }
-            }
+    // === DURATION TRACKING WITHOUT BUFF ===
+    // Store expiration info on the summoner (or summoned actor) as an array
+    let expirationData = {};
+    if (game.combat && firstSummonedToken) {
+        // In combat: track round and initiative
+        let combat = game.combat;
+        let currentRound = combat.round;
+        let currentInitiative = combat.turns.find(t => t.tokenId === firstSummonedToken.id)?.initiative ?? 0;
+        let duration = casterLevel; // in rounds
+        // Expire at the start of the first summoned monster's turn, casterLevel rounds later
+        let expireRound = currentRound + duration;
+        let expireTokenId = firstSummonedToken.id;
+        expirationData = {
+            mode: "combat",
+            actorId: createdMonster.id,
+            tokenId: expireTokenId,
+            expireRound,
+            combatId: combat.id,
+            created: Date.now()
         };
-        await summonerActor.createEmbeddedDocuments("Item", [durationBuff]);
-    } else {
-        ui.notifications.warn("Could not find summoner to apply duration buff.");
+        let prevExpirations = await summonerActor.getFlag("world", "summonExpirations") || [];
+        prevExpirations.push(expirationData);
+        await summonerActor.setFlag("world", "summonExpirations", prevExpirations);
+    } else if (firstSummonedToken) {
+        // Out of combat: use Simple Calendar
+        let expireTime;
+        if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar) {
+            // Use Simple Calendar API
+            let scApi = window.SimpleCalendar.api;
+            let now = scApi.timestampToDate(scApi.currentTimestamp());
+            // 1 round = 6 seconds
+            let seconds = casterLevel * 6;
+            expireTime = scApi.timestampPlusInterval(scApi.currentTimestamp(), {seconds});
+        } else {
+            // Fallback: real time
+            expireTime = Date.now() + casterLevel * 6 * 1000;
+        }
+        expirationData = {
+            mode: "calendar",
+            actorId: createdMonster.id,
+            tokenId: firstSummonedToken.id,
+            expireTime,
+            created: Date.now()
+        };
+        let prevExpirations = await summonerActor.getFlag("world", "summonExpirations") || [];
+        prevExpirations.push(expirationData);
+        await summonerActor.setFlag("world", "summonExpirations", prevExpirations);
     }
 
     // After all tokens are spawned
@@ -654,12 +650,52 @@ if (!state) {
         content: msg
     });
 }
+// === HOOK: Check for expiration at each turn ===
+if (!window._summonExpirationHookId) {
+    window._summonExpirationHookId = Hooks.on("updateCombat", async (combat, changed, options, userId) => {
+        if (!("round" in changed || "turn" in changed)) return;
+        for (let actor of game.actors.contents) {
+            let expirations = actor.getFlag("world", "summonExpirations");
+            if (!Array.isArray(expirations) || !expirations.length) continue;
+            let changed = false;
+            for (let exp of expirations) {
+                if (exp.mode !== "combat" || exp.combatId !== combat.id) continue;
+                let {actorId, tokenId, expireRound, expireInitiative} = exp;
+                let currentToken = combat.turns[combat.turn]?.tokenId;
+                // Trigger expiration at the START of the turn (before the token acts)
+                if (combat.round === expireRound && combat.turn === expireInitiative && currentToken === tokenId) {
+                    // Expired! Post chat card with delete button
+                    let chatContent = `<div class=\"pf1 chat-card\">` +
+                        `<header class=\"card-header flexrow\">` +
+                        `<h3 class=\"actor-name\">Summon Expired</h3>` +
+                        `</header>` +
+                        `<div class=\"result-text\">` +
+                        `<p>The summon duration has expired. <button data-action=\"delete-summon\" data-actor-id=\"${actorId}\" data-summoner-id=\"${actor.id}\">Delete Summon</button></p>` +
+                        `</div>` +
+                        `</div>`;
+                    ChatMessage.create({content: chatContent});
+                    changed = true;
+                }
+            }
+            if (changed) {
+                let newExpirations = expirations.filter(exp => {
+                    if (exp.mode !== "combat" || exp.combatId !== combat.id) return true;
+                    let {expireRound, tokenId} = exp;
+                    let currentToken = combat.turns[combat.turn]?.tokenId;
+                    return !(combat.round === expireRound && currentToken === tokenId);
+                });
+                await actor.setFlag("world", "summonExpirations", newExpirations);
+            }
+        }
+    });
+}
+
 // Set up a listener for the delete button
 if (!window._summonDeleteHookId) {
     window._summonDeleteHookId = Hooks.on("renderChatMessage", (message, html, data) => {
         html.find('button[data-action="delete-summon"]').click(async function() {
             const actorId = this.dataset.actorId;
-            const itemId = this.dataset.itemId;
+            const summonerId = this.dataset.summonerId;
             // Find all tokens for this actor
             let toks = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
             let tokenIds = toks.map(t => t.id);
@@ -681,17 +717,13 @@ if (!window._summonDeleteHookId) {
             // Delete the actor
             let monster = game.actors.get(actorId);
             if (monster) await monster.delete();
-            // Delete the buff item from the summoner (GM can always do this)
-            let summoner = game.actors.find(a => a.items.get(itemId));
-            if (summoner) {
-                let item = summoner.items.get(itemId);
-                if (item) {
-                    // If GM, use GM privileges to delete the item
-                    if (game.user.isGM) {
-                        await Item.deleteDocuments([itemId], {parent: summoner});
-                    } else {
-                        await item.delete();
-                    }
+            // Remove only the relevant expiration from the summoner
+            if (summonerId) {
+                let summoner = game.actors.get(summonerId);
+                if (summoner) {
+                    let expirations = summoner.getFlag("world", "summonExpirations") || [];
+                    let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
+                    await summoner.setFlag("world", "summonExpirations", newExpirations);
                 }
             }
             ChatMessage.create({content: "<p>Summon deleted.</p>"});
