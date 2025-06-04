@@ -21,7 +21,7 @@ const config = {
     destinationFolder: "Summons", // Folder to file summons in when imported. Will be auto-created by GM users, but not players
     renameAugmented: true, // Appends "(Augmented)" to the token if augmented"
     useUserLinkedActorOnly: true, // Change to false to allow users to use any selected token they own as the summoner
-    enableAugmentSummoning: true,      // Show Augment Summoning checkbox
+    enableAugmentSummoning: false,      // Show Augment Summoning checkbox
     enableExtendMetamagic: false,       // Show Extend Metamagic checkbox
     enableReachMetamagic: false,        // Show Reach Metamagic checkbox
     enableConjuredArmor: true,         // Show Conjured Armor checkbox
@@ -277,8 +277,10 @@ async function importMonster(html) {
     console.log("Importing Actor");
     let monsterEntity = await game.packs.get(selectedPack).getDocument(selectedMonster);
     
-    createdMonster = foundry.utils.duplicate(monsterEntity);
+    // Remove duplicate, just create from toObject
     createdMonster = await Actor.create(monsterEntity.toObject());
+    // Ensure we have the fully initialized Actor document
+    createdMonster = game.actors.get(createdMonster.id);
 
     console.log("Actor Imported");
     
@@ -326,25 +328,26 @@ async function importMonster(html) {
     
     //Set up buff for augment
     let buffData = null;
-    if (html.find("#augmentCheck")[0].checked) {
+    if (html.find("#augmentCheck")[0] && html.find("#augmentCheck")[0].checked) {
         buffData = { type: "buff", name: "Augment Summoning", system: { buffType: "temp" } };
     }
 
     //Set up buff for harrowed summoning
     let buffDataH = null;
-    if (html.find("#harrow1")[0].value !== "") {
+    if (html.find("#harrow1")[0] && html.find("#harrow1")[0].value !== "") {
         buffDataH = { type: "buff", name: "Harrowed Summoning", system: { buffType: "temp" } };
     }
     
     // Set up range as close or medium based on caster level and range metamagic
-    if (html.find("#reachCheck")[0].checked) range = (100 + (casterLevel * 10));
+    if (html.find("#reachCheck")[0] && html.find("#reachCheck")[0].checked) range = (100 + (casterLevel * 10));
     else range = (25 + (Math.floor(casterLevel / 2) * 5));
     
     // Double caster level for extend metamagic
-    if (html.find("#extendCheck")[0].checked) casterLevel *= 2;
+    if (html.find("#extendCheck")[0] && html.find("#extendCheck")[0].checked) casterLevel *= 2;
 
     //Modify caster level for harrowed summoning
-    casterLevel = Math.floor(casterLevel * html.find("#harrowMatch")[0].value);
+    if (html.find("#harrowMatch")[0])
+        casterLevel = Math.floor(casterLevel * html.find("#harrowMatch")[0].value);
 
     // Add Template to actor and change actor's name
     let templateSelect = html.find("#template");
@@ -593,23 +596,34 @@ if (!state) {
         // Find all tokens for this actor on the canvas
         let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === createdMonster.id);
 
-        let firstCombatantId = null;
+        let firstSummonedCombatantId = null;
         for (let token of tokens) {
-            if (!game.combat.combatants.find(c => c.tokenId === token.id)) {
-                let [combatant] = await game.combat.createEmbeddedDocuments("Combatant", [{
+            let combatant = game.combat.combatants.find(c => c.tokenId === token.id);
+            if (!combatant) {
+                let [newCombatant] = await game.combat.createEmbeddedDocuments("Combatant", [{
                     tokenId: token.id,
                     actorId: token.actor.id
                 }]);
-                if (!firstCombatantId) firstCombatantId = combatant.id;
-                if (combatant && initiative !== null) {
-                    await combatant.update({initiative});
+                if (newCombatant && initiative !== null) {
+                    await newCombatant.update({initiative});
                 }
+                if (!firstSummonedCombatantId && newCombatant) firstSummonedCombatantId = newCombatant.id;
+            } else {
+                if (!firstSummonedCombatantId) firstSummonedCombatantId = combatant.id;
             }
         }
-        // Move turn to the first summoned monster
-        if (firstCombatantId) {
-            let idx = game.combat.combatants.findIndex(c => c.id === firstCombatantId);
-            if (idx !== -1) await game.combat.update({turn: idx});
+        // Wait a tick to ensure combatants are updated
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // Find the index of the first summoned combatant in the tracker
+        let combatantArr = Array.from(game.combat.combatants);
+        let idx = combatantArr.findIndex(c => c.id === firstSummonedCombatantId);
+        if (idx !== -1) {
+            let setIdx = Math.max(0, idx - 1);
+            console.log(`Setting turn to index ${setIdx} (${combatantArr[setIdx]?.name})`);
+            await game.combat.update({turn: setIdx});
+            ui.notifications.info(`Turn set to summoned monster: ${combatantArr[setIdx].name}`);
+        } else {
+            ui.notifications.warn("Could not set turn to summoned monster.");
         }
     }
 
