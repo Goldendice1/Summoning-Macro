@@ -599,12 +599,11 @@ async function importMonster(html) {
         let summonerCombatant = game.combat.combatants.find(c => c.actorId === summonerActor.id);
         let initiative = 0;
         if (summonerCombatant) {
-            initiative = summonerCombatant.initiative !== null ? summonerCombatant.initiative + 0.01 : 0;
+            initiative = summonerCombatant.initiative !== null ? summonerCombatant.initiative : 0;
         }
         // Find all tokens for this actor on the canvas
         let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === createdMonster.id);
-
-        let firstSummonedCombatantId = null;
+        let newSummonedCombatants = [];
         for (let token of tokens) {
             let combatant = game.combat.combatants.find(c => c.tokenId === token.id);
             if (!combatant) {
@@ -612,26 +611,51 @@ async function importMonster(html) {
                     tokenId: token.id,
                     actorId: token.actor.id
                 }]);
-                if (newCombatant && initiative !== null) {
-                    await newCombatant.update({initiative});
-                }
-                if (!firstSummonedCombatantId && newCombatant) firstSummonedCombatantId = newCombatant.id;
+                if (newCombatant) newSummonedCombatants.push(newCombatant);
             } else {
-                if (!firstSummonedCombatantId) firstSummonedCombatantId = combatant.id;
+                newSummonedCombatants.push(combatant);
             }
         }
         // Wait a tick to ensure combatants are updated
         await new Promise(resolve => setTimeout(resolve, 100));
-        // Find the index of the first summoned combatant in the tracker
-        let combatantArr = Array.from(game.combat.combatants);
-        let idx = combatantArr.findIndex(c => c.id === firstSummonedCombatantId);
-        if (idx !== -1) {
-            let setIdx = Math.max(0, idx - 1);
-            console.log(`Setting turn to index ${setIdx} (${combatantArr[setIdx]?.name})`);
-            await game.combat.update({turn: setIdx});
-            ui.notifications.info(`Turn set to summoned monster: ${combatantArr[setIdx].name}`);
-        } else {
-            ui.notifications.warn("Could not set turn to summoned monster.");
+        // --- New initiative logic: place summons at summonerInitiative+0.01, and chain up any ties ---
+        let allCombatants = Array.from(game.combat.combatants);
+        let summonerInit = initiative;
+        let newInit = Number((summonerInit + 0.01).toFixed(2));
+        // Set new summons to newInit
+        for (let c of newSummonedCombatants) {
+            await c.update({initiative: newInit});
+        }
+        // Find all other combatants (not new summons or summoner) at newInit
+        let newSummonedIds = newSummonedCombatants.map(c => c.id);
+        let toBump = allCombatants.filter(c => !newSummonedIds.includes(c.id) && c.id !== summonerCombatant?.id && c.initiative === newInit);
+        // Chain bump upwards to avoid ties, but only bump each combatant once
+        let bumpInit = newInit;
+        const bumpedIds = new Set();
+        while (toBump.length > 0) {
+            bumpInit = Number((bumpInit + 0.01).toFixed(2));
+            for (let c of toBump) {
+                if (!bumpedIds.has(c.id)) {
+                    await c.update({initiative: bumpInit});
+                    bumpedIds.add(c.id);
+                }
+            }
+            // Re-fetch allCombatants to reflect updated initiatives
+            allCombatants = Array.from(game.combat.combatants);
+            // Only bump those at the new bumpInit value, and not already bumped
+            toBump = allCombatants.filter(c => !newSummonedIds.includes(c.id) && c.id !== summonerCombatant?.id && c.initiative === bumpInit && !bumpedIds.has(c.id));
+        }
+        await game.combat.setupTurns();
+        // Set turn to the first of the new summoned combatants
+        let allSorted = Array.from(game.combat.combatants).slice().sort((a, b) => {
+            if (b.initiative !== a.initiative) return (b.initiative||0) - (a.initiative||0);
+            return a.sort - b.sort;
+        });
+        let firstIdx = allSorted.findIndex(c => newSummonedIds.includes(c.id));
+        if (firstIdx !== -1) {
+            await game.combat.update({ turn: firstIdx });
+            let name = allSorted[firstIdx]?.name || "Summoned Creature";
+            ui.notifications.info(`Turn set to summoned monster: ${name}`);
         }
     }
 
@@ -660,17 +684,35 @@ if (!window._summonExpirationHookId) {
             let changed = false;
             for (let exp of expirations) {
                 if (exp.mode !== "combat" || exp.combatId !== combat.id) continue;
-                let {actorId, tokenId, expireRound, expireInitiative} = exp;
-                let currentToken = combat.turns[combat.turn]?.tokenId;
-                // Trigger expiration at the START of the turn (before the token acts)
-                if (combat.round === expireRound && combat.turn === expireInitiative && currentToken === tokenId) {
-                    // Expired! Post chat card with delete button
+                let {actorId, tokenId, expireRound} = exp;
+                // Find all tokens for this actor on the canvas, excluding those with the 'dead' condition
+                let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                let tokenIds = tokens.map(t => t.id);
+                // Use a placeholder span for the delete button, to be replaced at render time
+                let buttonPlaceholder = `<span class=\"summon-delete-placeholder\" data-actor-id=\"${actorId}\" data-summoner-id=\"${actor.id}\"></span>`;
+                // If all tokens are gone (or all are dead), expire immediately, even if duration not over
+                if (tokenIds.length === 0) {
                     let chatContent = `<div class=\"pf1 chat-card\">` +
                         `<header class=\"card-header flexrow\">` +
                         `<h3 class=\"actor-name\">Summon Expired</h3>` +
                         `</header>` +
                         `<div class=\"result-text\">` +
-                        `<p>The summon duration has expired. <button data-action=\"delete-summon\" data-actor-id=\"${actorId}\" data-summoner-id=\"${actor.id}\">Delete Summon</button></p>` +
+                        `<p>The summon duration has expired (all tokens defeated). ` + buttonPlaceholder +
+                        `</p>` +
+                        `</div>` +
+                        `</div>`;
+                    ChatMessage.create({content: chatContent});
+                    changed = true;
+                }
+                // Otherwise, expire at the start of the turn of any remaining token at the correct round
+                else if (combat.round === expireRound && tokenIds.includes(combat.turns[combat.turn]?.tokenId)) {
+                    let chatContent = `<div class=\"pf1 chat-card\">` +
+                        `<header class=\"card-header flexrow\">` +
+                        `<h3 class=\"actor-name\">Summon Expired</h3>` +
+                        `</header>` +
+                        `<div class=\"result-text\">` +
+                        `<p>The summon duration has expired. ` + buttonPlaceholder +
+                        `</p>` +
                         `</div>` +
                         `</div>`;
                     ChatMessage.create({content: chatContent});
@@ -680,9 +722,13 @@ if (!window._summonExpirationHookId) {
             if (changed) {
                 let newExpirations = expirations.filter(exp => {
                     if (exp.mode !== "combat" || exp.combatId !== combat.id) return true;
-                    let {expireRound, tokenId} = exp;
-                    let currentToken = combat.turns[combat.turn]?.tokenId;
-                    return !(combat.round === expireRound && currentToken === tokenId);
+                    let {actorId, expireRound} = exp;
+                    let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                    let tokenIds = tokens.map(t => t.id);
+                    // Remove if all tokens are gone (or all are dead), or if any token's turn triggered expiration
+                    if (tokenIds.length === 0) return false;
+                    if (combat.round === expireRound && tokenIds.includes(combat.turns[combat.turn]?.tokenId)) return false;
+                    return true;
                 });
                 await actor.setFlag("world", "summonExpirations", newExpirations);
             }
@@ -690,43 +736,49 @@ if (!window._summonExpirationHookId) {
     });
 }
 
-// Set up a listener for the delete button
+// Set up a listener for the delete button (render-time injection)
 if (!window._summonDeleteHookId) {
     window._summonDeleteHookId = Hooks.on("renderChatMessage", (message, html, data) => {
-        html.find('button[data-action="delete-summon"]').click(async function() {
+        html.find('span.summon-delete-placeholder').each(function() {
             const actorId = this.dataset.actorId;
             const summonerId = this.dataset.summonerId;
-            // Find all tokens for this actor
-            let toks = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
-            let tokenIds = toks.map(t => t.id);
-
-            // Remove combatants for these tokens and actor
-            if (game.combat) {
-                let combatants = game.combat.combatants.filter(c =>
-                    (c.tokenId && tokenIds.includes(c.tokenId)) || c.actorId === actorId
-                );
-                for (let combatant of combatants) {
-                    await combatant.delete();
+            // Always render the button, always enabled for all users
+            const button = $(`<button data-action=\"delete-summon\" data-actor-id=\"${actorId}\" data-summoner-id=\"${summonerId}\">Delete Summon</button>`).addClass('message-button');
+            button.on('click', async function() {
+                // Find all tokens for this actor
+                let toks = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
+                let tokenIds = toks.map(t => t.id);
+                // Remove combatants for these tokens and actor
+                if (game.combat) {
+                    let combatants = game.combat.combatants.filter(c =>
+                        (c.tokenId && tokenIds.includes(c.tokenId)) || c.actorId === actorId
+                    );
+                    for (let combatant of combatants) {
+                        await combatant.delete();
+                    }
                 }
-            }
-
-            // Delete all tokens for this actor
-            for (let tok of toks) {
-                await tok.document.delete();
-            }
-            // Delete the actor
-            let monster = game.actors.get(actorId);
-            if (monster) await monster.delete();
-            // Remove only the relevant expiration from the summoner
-            if (summonerId) {
-                let summoner = game.actors.get(summonerId);
-                if (summoner) {
-                    let expirations = summoner.getFlag("world", "summonExpirations") || [];
-                    let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
-                    await summoner.setFlag("world", "summonExpirations", newExpirations);
+                // Delete all tokens for this actor
+                for (let tok of toks) {
+                    await tok.document.delete();
                 }
-            }
-            ChatMessage.create({content: "<p>Summon deleted.</p>"});
+                // Delete the actor
+                let monster = game.actors.get(actorId);
+                if (monster) await monster.delete();
+                // Remove only the relevant expiration from the summoner
+                if (summonerId) {
+                    let summoner = game.actors.get(summonerId);
+                    if (summoner) {
+                        let expirations = summoner.getFlag("world", "summonExpirations") || [];
+                        let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
+                        await summoner.setFlag("world", "summonExpirations", newExpirations);
+                    }
+                }
+                // Remove the button after successful usage
+                $(this).remove();
+                ChatMessage.create({content: "<p>Summon deleted.</p>"});
+            });
+            // Always show the button, always enabled
+            $(this).replaceWith(button);
         });
     });
 }
