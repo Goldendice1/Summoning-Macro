@@ -571,13 +571,16 @@ async function importMonster(html) {
     } else if (firstSummonedToken) {
         // Out of combat: use Simple Calendar
         let expireTime;
-        if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar) {
-            // Use Simple Calendar API
-            let scApi = window.SimpleCalendar.api;
-            let now = scApi.timestampToDate(scApi.currentTimestamp());
+        if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar?.api) {
+            // Use Simple Calendar v2+ API
+            const scApi = window.SimpleCalendar.api;
             // 1 round = 6 seconds
-            let seconds = casterLevel * 6;
-            expireTime = scApi.timestampPlusInterval(scApi.currentTimestamp(), {seconds});
+            const seconds = casterLevel * 6;
+            // Get the current in-game timestamp
+            const nowTimestamp = scApi.timestamp();
+            // Add seconds to get the expiration timestamp
+            const expireTimestamp = nowTimestamp + seconds;
+            expireTime = expireTimestamp;
         } else {
             // Fallback: real time
             expireTime = Date.now() + casterLevel * 6 * 1000;
@@ -685,37 +688,16 @@ if (!window._summonExpirationHookId) {
             for (let exp of expirations) {
                 if (exp.mode !== "combat" || exp.combatId !== combat.id) continue;
                 let {actorId, tokenId, expireRound} = exp;
-                // Find all tokens for this actor on the canvas, excluding those with the 'dead' condition
                 let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
                 let tokenIds = tokens.map(t => t.id);
-                // Use a placeholder span for the delete button, to be replaced at render time
-                let buttonPlaceholder = `<span class=\"summon-delete-placeholder\" data-actor-id=\"${actorId}\" data-summoner-id=\"${actor.id}\"></span>`;
-                // If all tokens are gone (or all are dead), expire immediately, even if duration not over
+                // Use a placeholder span for the delete button
+                let buttonHtml = `<span class='summon-delete-placeholder' data-actor-id='${actorId}' data-summoner-id='${actor.id}'></span>`;
                 if (tokenIds.length === 0) {
-                    let chatContent = `<div class=\"pf1 chat-card\">` +
-                        `<header class=\"card-header flexrow\">` +
-                        `<h3 class=\"actor-name\">Summon Expired</h3>` +
-                        `</header>` +
-                        `<div class=\"result-text\">` +
-                        `<p>The summon duration has expired (all tokens defeated). ` + buttonPlaceholder +
-                        `</p>` +
-                        `</div>` +
-                        `</div>`;
-                    ChatMessage.create({content: chatContent});
+                    ChatMessage.create({content: `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Expired</h3></header><div class=\"result-text\"><p>The summon duration has expired (all tokens defeated). ${buttonHtml}</p></div></div>`});
                     changed = true;
                 }
-                // Otherwise, expire at the start of the turn of any remaining token at the correct round
                 else if (combat.round === expireRound && tokenIds.includes(combat.turns[combat.turn]?.tokenId)) {
-                    let chatContent = `<div class=\"pf1 chat-card\">` +
-                        `<header class=\"card-header flexrow\">` +
-                        `<h3 class=\"actor-name\">Summon Expired</h3>` +
-                        `</header>` +
-                        `<div class=\"result-text\">` +
-                        `<p>The summon duration has expired. ` + buttonPlaceholder +
-                        `</p>` +
-                        `</div>` +
-                        `</div>`;
-                    ChatMessage.create({content: chatContent});
+                    ChatMessage.create({content: `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Expired</h3></header><div class=\"result-text\"><p>The summon duration has expired. ${buttonHtml}</p></div></div>`});
                     changed = true;
                 }
             }
@@ -725,7 +707,6 @@ if (!window._summonExpirationHookId) {
                     let {actorId, expireRound} = exp;
                     let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
                     let tokenIds = tokens.map(t => t.id);
-                    // Remove if all tokens are gone (or all are dead), or if any token's turn triggered expiration
                     if (tokenIds.length === 0) return false;
                     if (combat.round === expireRound && tokenIds.includes(combat.turns[combat.turn]?.tokenId)) return false;
                     return true;
@@ -736,49 +717,160 @@ if (!window._summonExpirationHookId) {
     });
 }
 
-// Set up a listener for the delete button (render-time injection)
-if (!window._summonDeleteHookId) {
-    window._summonDeleteHookId = Hooks.on("renderChatMessage", (message, html, data) => {
+// === OUT-OF-COMBAT SUMMON EXPIRATION CHECK (Simple Calendar, via DateTimeChange hook) ===
+if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar?.api && window.SimpleCalendar?.Hooks?.DateTimeChange) {
+    if (!window._summonCalendarExpirationHookId) {
+        window._summonCalendarExpirationHookId = Hooks.on(window.SimpleCalendar.Hooks.DateTimeChange, async () => {
+            const scApi = window.SimpleCalendar.api;
+            for (let actor of game.actors.contents) {
+                let expirations = actor.getFlag("world", "summonExpirations");
+                if (!Array.isArray(expirations) || !expirations.length) continue;
+                let changed = false;
+                for (let exp of expirations) {
+                    if (exp.mode !== "calendar") continue;
+                    let { actorId, tokenId, expireTime } = exp;
+                    let now = scApi.timestamp();
+                    let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                    let tokenIds = tokens.map(t => t.id);
+                    // Use a placeholder span for the delete button
+                    let buttonHtml = `<span class='summon-delete-placeholder' data-actor-id='${actorId}' data-summoner-id='${actor.id}'></span>`;
+                    if (tokenIds.length === 0 || now >= expireTime) {
+                        let chatCard = `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Expired</h3></header><div class=\"result-text\"><p>The summon duration has expired. ${buttonHtml}</p></div></div>`;
+                        ChatMessage.create({ content: chatCard });
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    let newExpirations = expirations.filter(exp => {
+                        if (exp.mode !== "calendar") return true;
+                        let { actorId, expireTime } = exp;
+                        let now = scApi.timestamp();
+                        let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                        let tokenIds = tokens.map(t => t.id);
+                        if (tokenIds.length === 0 || now >= expireTime) return false;
+                        return true;
+                    });
+                    await actor.setFlag("world", "summonExpirations", newExpirations);
+                }
+            }
+        });
+    }
+}
+
+// === DELETE SUMMON BUTTON HANDLER (render-time, robust) ===
+if (!window._summonDeleteButtonHookId) {
+    window._summonDeleteButtonHookId = Hooks.on("renderChatMessage", (message, html, data) => {
         html.find('span.summon-delete-placeholder').each(function() {
-            const actorId = this.dataset.actorId;
-            const summonerId = this.dataset.summonerId;
-            // Always render the button, always enabled for all users
-            const button = $(`<button data-action=\"delete-summon\" data-actor-id=\"${actorId}\" data-summoner-id=\"${summonerId}\">Delete Summon</button>`).addClass('message-button');
+            const actorId = $(this).data('actor-id');
+            const summonerId = $(this).data('summoner-id');
+            const button = $(`<button type='button'><i class='fas fa-trash'></i> Delete Summon</button>`);
             button.on('click', async function() {
-                // Find all tokens for this actor
-                let toks = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
-                let tokenIds = toks.map(t => t.id);
-                // Remove combatants for these tokens and actor
-                if (game.combat) {
-                    let combatants = game.combat.combatants.filter(c =>
-                        (c.tokenId && tokenIds.includes(c.tokenId)) || c.actorId === actorId
-                    );
-                    for (let combatant of combatants) {
-                        await combatant.delete();
-                    }
+                // Remove all tokens for this actor from the canvas
+                const tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
+                for (let token of tokens) {
+                    await token.document.delete();
                 }
-                // Delete all tokens for this actor
-                for (let tok of toks) {
-                    await tok.document.delete();
+                // Remove the expiration entry from the summoner's flag
+                const summoner = game.actors.get(summonerId);
+                if (summoner) {
+                    let expirations = await summoner.getFlag("world", "summonExpirations") || [];
+                    let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
+                    await summoner.setFlag("world", "summonExpirations", newExpirations);
                 }
-                // Delete the actor
-                let monster = game.actors.get(actorId);
-                if (monster) await monster.delete();
-                // Remove only the relevant expiration from the summoner
-                if (summonerId) {
-                    let summoner = game.actors.get(summonerId);
-                    if (summoner) {
-                        let expirations = summoner.getFlag("world", "summonExpirations") || [];
-                        let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
-                        await summoner.setFlag("world", "summonExpirations", newExpirations);
-                    }
-                }
-                // Remove the button after successful usage
+                // Optionally, post a message
+                ChatMessage.create({content: `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Deleted</h3></header><div class=\"result-text\"><p>The summon has been deleted.</p></div></div>`});
                 $(this).remove();
-                ChatMessage.create({content: "<p>Summon deleted.</p>"});
             });
-            // Always show the button, always enabled
             $(this).replaceWith(button);
         });
     });
 }
+
+// === CONVERT IN-COMBAT SUMMONS TO OUT-OF-COMBAT ON COMBAT END ===
+if (!window._summonCombatEndHookId) {
+    window._summonCombatEndHookId = Hooks.on("deleteCombat", async (combat, options, userId) => {
+        // Only run if Simple Calendar is active
+        if (!(game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar?.api)) return;
+        const scApi = window.SimpleCalendar.api;
+        const now = scApi.timestamp();
+        const lastRound = combat.round || 0;
+        console.log("[SummonMacro] Combat ended. Last round:", lastRound);
+        for (let actor of game.actors.contents) {
+            let expirations = await actor.getFlag("world", "summonExpirations");
+            if (!Array.isArray(expirations) || !expirations.length) continue;
+            let updatedExpirations = [];
+            for (let exp of expirations) {
+                if (exp.mode === "combat" && exp.combatId === combat.id) {
+                    let remainingRounds = exp.expireRound - lastRound;
+                    console.log(`[SummonMacro] Converting combat expiration for actorId=${exp.actorId}, expireRound=${exp.expireRound}, lastRound=${lastRound}, remainingRounds=${remainingRounds}`);
+                    if (remainingRounds > 0) {
+                        // Create new out-of-combat (calendar) expiration for remaining duration
+                        let expireTime;
+                        if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar?.api) {
+                            const scApi = window.SimpleCalendar.api;
+                            const seconds = remainingRounds * 6;
+                            const nowTimestamp = scApi.timestamp();
+                            expireTime = nowTimestamp + seconds;
+                        } else {
+                            expireTime = Date.now() + remainingRounds * 6 * 1000;
+                        }
+                        updatedExpirations.push({
+                            mode: "calendar",
+                            actorId: exp.actorId,
+                            tokenId: exp.tokenId,
+                            expireTime,
+                            created: Date.now()
+                        });
+                    }
+                } else {
+                    // Keep all non-matching expirations
+                    updatedExpirations.push(exp);
+                }
+            }
+            await actor.setFlag("world", "summonExpirations", updatedExpirations);
+            console.log(`[SummonMacro] Updated summonExpirations for actorId=${actor.id}`);
+            // If we created a new calendar expiration, ensure the out-of-combat expiration hook is registered
+            if (updatedExpirations.some(e => e.mode === "calendar")) {
+                if (game.modules.get('foundryvtt-simple-calendar')?.active && window.SimpleCalendar?.api && window.SimpleCalendar?.Hooks?.DateTimeChange) {
+                    if (!window._summonCalendarExpirationHookId) {
+                        window._summonCalendarExpirationHookId = Hooks.on(window.SimpleCalendar.Hooks.DateTimeChange, async () => {
+                            const scApi = window.SimpleCalendar.api;
+                            for (let actor of game.actors.contents) {
+                                let expirations = actor.getFlag("world", "summonExpirations");
+                                if (!Array.isArray(expirations) || !expirations.length) continue;
+                                let changed = false;
+                                for (let exp of expirations) {
+                                    if (exp.mode !== "calendar") continue;
+                                    let { actorId, tokenId, expireTime } = exp;
+                                    let now = scApi.timestamp();
+                                    let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                                    let tokenIds = tokens.map(t => t.id);
+                                    let buttonHtml = `<span class='summon-delete-placeholder' data-actor-id='${actorId}' data-summoner-id='${actor.id}'></span>`;
+                                    if (tokenIds.length === 0 || now >= expireTime) {
+                                        let chatCard = `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Expired</h3></header><div class=\"result-text\"><p>The summon duration has expired. ${buttonHtml}</p></div></div>`;
+                                        ChatMessage.create({ content: chatCard });
+                                        changed = true;
+                                    }
+                                }
+                                if (changed) {
+                                    let newExpirations = expirations.filter(exp => {
+                                        if (exp.mode !== "calendar") return true;
+                                        let { actorId, expireTime } = exp;
+                                        let now = scApi.timestamp();
+                                        let tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId && !t.actor.system?.conditions?.dead);
+                                        let tokenIds = tokens.map(t => t.id);
+                                        if (tokenIds.length === 0 || now >= expireTime) return false;
+                                        return true;
+                                    });
+                                    await actor.setFlag("world", "summonExpirations", newExpirations);
+                                }
+                            }
+                        });
+                        console.log("[SummonMacro] Registered out-of-combat expiration hook after combat end.");
+                    }
+                }
+            }
+        }
+    });
+}
+
