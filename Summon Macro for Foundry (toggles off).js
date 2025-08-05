@@ -160,7 +160,7 @@ if (summonerActor && summonerToken) {
             ${config.enableAugmentSummoning ? `
             <div class="form-group">
                 <label>Augment Summoning:</label>
-                <input type="checkbox" id="augmentCheck">
+                <input type="checkbox" id="augmentCheck" checked>
             </div>` : ""}
             ${config.enableExtendMetamagic ? `
             <div class="form-group">
