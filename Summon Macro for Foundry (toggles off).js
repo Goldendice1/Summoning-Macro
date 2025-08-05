@@ -21,7 +21,7 @@ const config = {
     destinationFolder: "Summons", // Folder to file summons in when imported. Will be auto-created by GM users, but not players
     renameAugmented: true, // Appends "(Augmented)" to the token if augmented"
     useUserLinkedActorOnly: true, // Change to false to allow users to use any selected token they own as the summoner
-    enableAugmentSummoning: false,      // Show Augment Summoning checkbox
+    enableAugmentSummoning: true,      // Show Augment Summoning checkbox
     enableExtendMetamagic: false,       // Show Extend Metamagic checkbox
     enableReachMetamagic: false,        // Show Reach Metamagic checkbox
     enableConjuredArmor: true,         // Show Conjured Armor checkbox
@@ -33,7 +33,7 @@ let packOptions = `<option value=""></option>` + game.packs.filter(p => p.docume
 
 let summonerActor;
 let summonerToken;
-let classArray = [];
+// let classArray = []; // No longer needed; using spellbooks
 let gNumSpawned = 0;
 let gNeedSpawn = 100;
 let createdMonster;
@@ -79,9 +79,41 @@ console.log("After selection: summonerActor:", summonerActor, "summonerToken:", 
 
 if (summonerActor && summonerToken) {
     console.log("Token and actor found:", summonerActor.name, summonerToken.name);
-    // Build list of character's classes sorted by level (high to low)
-    classArray = Object.values(summonerActor.items.filter(o => o.type === 'class')).sort((a, b) => {return b.system.level - a.system.level});
-    let classOptions = classArray.map((p, index) => `<option value="${index}">${p.name} (Level ${p.system.level})</option>`);
+    // Build list of spellbooks from actor's system.attributes.spells.spellbooks
+    let spellbooks = summonerActor.system?.attributes?.spells?.spellbooks || {};
+    console.log("[SummonMacro] spellbooks object:", spellbooks);
+    let spellbookKeys = Object.keys(spellbooks);
+    console.log("[SummonMacro] spellbook keys:", spellbookKeys);
+    if (spellbookKeys.length === 0) {
+        console.warn("[SummonMacro] No spellbooks found on actor.");
+    }
+    let schoolConCL = summonerActor.system?.attributes?.spells?.school?.con?.cl;
+    let spellbookOptions = spellbookKeys
+        .map(key => {
+            if (typeof key !== 'string') return '';
+            const value = spellbooks[key];
+            if (!value?.inUse) return '';
+            let className = (typeof value.class === 'string') ? value.class : (value.class && typeof value.class.name === 'string' ? value.class.name : undefined);
+            if (!className) {
+                console.warn(`[SummonMacro] Skipping spellbook key: ${key} due to missing or invalid class name. Got:`, value.class);
+                return '';
+            }
+            let classNameCap = className.charAt(0).toUpperCase() + className.slice(1);
+            let cl = (typeof value.cl?.total === 'number') ? value.cl.total : value.cl || 1;
+            // Add conjuration CL bonus if present
+            let conjBonus = (typeof schoolConCL === 'number' && schoolConCL > 0) ? schoolConCL : 0;
+            let totalCL = cl + conjBonus;
+            let bonusText = conjBonus ? ` (+${conjBonus} Conj)` : '';
+            let optionHtml = `<option value="${String(key)}">${classNameCap} (CL ${totalCL}${bonusText})</option>`;
+            console.log(`[SummonMacro] Adding option:`, optionHtml);
+            return optionHtml;
+        })
+        .filter(opt => typeof opt === 'string' && opt.length > 0)
+        .join('');
+    // If spellbookOptions is empty, the dropdown will be empty (no fallback)
+    if (!spellbookOptions) {
+        console.warn('[SummonMacro] No valid spellbooks to populate dropdown. Dropdown will be empty.');
+    }
     
     let ownerCheck = "";
     if (game.user.isGM && summonerActor.hasPlayerOwner) ownerCheck = `<div class="form-group"><label>Give Ownership to ${summonerActor.name}'s Owners:</label><input type="checkbox" id="ownerCheck"></div>`;
@@ -94,8 +126,8 @@ if (summonerActor && summonerToken) {
                 <p>${summonerActor.name}</p>
             </div>
             <div class="form-group">
-                <label>CL Class:</label>
-                <select id="classSelect">${classOptions}</select>
+                <label>Spellbook:</label>
+                <select id="classSelect">${spellbookOptions}</select>
             </div>
             <div class="form-group">
                 <label>CL Override:</label>
@@ -315,14 +347,24 @@ async function importMonster(html) {
     gNeedSpawn = rollResult;
     
     // Find chosen caster level info
-    let chosenIndex = parseInt(html.find("#classSelect").val());
-    let classCL = classArray[chosenIndex].system.level;
-    let casterLevel = classCL;
+    let chosenKey = html.find("#classSelect").val();
+    let spellbooks = summonerActor.system?.attributes?.spells?.spellbooks || {};
+    let classCL = (spellbooks[chosenKey]?.cl?.total) || spellbooks[chosenKey]?.cl || 1;
+    // Add conjuration CL bonus if present in system.attributes.spells.school.con.cl
+    let conjBonus = 0;
+    let schoolConCL = summonerActor.system?.attributes?.spells?.school?.con?.cl;
+    if (typeof schoolConCL === 'number' && schoolConCL > 0) {
+        conjBonus = schoolConCL;
+    }
+    let casterLevel = classCL + conjBonus;
+    if (conjBonus) {
+        console.log(`[SummonMacro] Adding conjuration CL bonus from system.attributes.spells.school.con.cl: +${conjBonus}, total CL now: ${casterLevel}`);
+    }
     let clOverride = parseInt(html.find("#clOverride").val());
-    
+
     // Validate caster level override is a number > 0
     if (!isNaN(clOverride)) {
-        if (clOverride <= 0) ui.notifications.error(`${clOverride} not a valid caster level. Defaulting to class level.`);
+        if (clOverride <= 0) ui.notifications.error(`${clOverride} not a valid caster level. Defaulting to spellbook CL.`);
         else casterLevel = clOverride;
     }
     
@@ -479,9 +521,17 @@ async function importMonster(html) {
 
     // Conjured Armor Buff
     if (html.find("#conjuredArmorCheck")[0]?.checked) {
-        // Find the summoner's psychic class level
-        let psychicClass = classArray.find(c => c.name.toLowerCase().includes("psychic"));
-        let psychicLevel = psychicClass ? psychicClass.system.level : 0;
+        // Find the summoner's psychic class level from spellbooks
+        let spellbooks = summonerActor.system?.attributes?.spells?.spellbooks || {};
+        let psychicLevel = 0;
+        for (let key in spellbooks) {
+            let sb = spellbooks[key];
+            let className = (typeof sb.class === 'string') ? sb.class : (sb.class && typeof sb.class.name === 'string' ? sb.class.name : undefined);
+            if (className && className.toLowerCase().includes("psychic")) {
+                psychicLevel = sb.cl?.total || sb.cl || 0;
+                break;
+            }
+        }
         if (psychicLevel > 0) {
             let deflectionBonus = 2;
             if (psychicLevel >= 8) deflectionBonus += 1;
@@ -765,10 +815,23 @@ if (!window._summonDeleteButtonHookId) {
             const summonerId = $(this).data('summoner-id');
             const button = $(`<button type='button'><i class='fas fa-trash'></i> Delete Summon</button>`);
             button.on('click', async function() {
+                // Remove combatants for this actor from the combat tracker first
+                if (game.combat) {
+                    let toDelete = game.combat.combatants.filter(c => c.actorId === actorId);
+                    if (toDelete.length > 0) {
+                        let ids = toDelete.map(c => c.id);
+                        await game.combat.deleteEmbeddedDocuments("Combatant", ids);
+                    }
+                }
                 // Remove all tokens for this actor from the canvas
                 const tokens = canvas.tokens.placeables.filter(t => t.actor && t.actor.id === actorId);
                 for (let token of tokens) {
                     await token.document.delete();
+                }
+                // Remove the actor from the world
+                const summonedActor = game.actors.get(actorId);
+                if (summonedActor) {
+                    await summonedActor.delete();
                 }
                 // Remove the expiration entry from the summoner's flag
                 const summoner = game.actors.get(summonerId);
@@ -776,6 +839,10 @@ if (!window._summonDeleteButtonHookId) {
                     let expirations = await summoner.getFlag("world", "summonExpirations") || [];
                     let newExpirations = expirations.filter(exp => exp.actorId !== actorId);
                     await summoner.setFlag("world", "summonExpirations", newExpirations);
+                }
+                // Force refresh of combat tracker UI
+                if (game.combat) {
+                    await game.combat.setupTurns();
                 }
                 // Optionally, post a message
                 ChatMessage.create({content: `<div class=\"pf1 chat-card\"><header class=\"card-header flexrow\"><h3 class=\"actor-name\">Summon Deleted</h3></header><div class=\"result-text\"><p>The summon has been deleted.</p></div></div>`});
