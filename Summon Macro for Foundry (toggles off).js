@@ -12,7 +12,7 @@
  * Uses standard Pathfinder 1e summon monster/nature's ally rules
  * (1 round/CL, close range, extend metamagic doubles duration, reach metamagic is medium range)
  * 
- * Supports Augment Summoning, Harrowed Summoning, and the 4 default alignment templates
+ * Supports Augment Summoning, Harrowed Summoning, Conjured Armor pyschic knack, and the 4 default alignment templates
  **/
 const config = {
     packSource: ["summons-for-pf1e"], // list of package sources for summons actor folders
@@ -33,7 +33,6 @@ let packOptions = `<option value=""></option>` + game.packs.filter(p => p.docume
 
 let summonerActor;
 let summonerToken;
-// let classArray = []; // No longer needed; using spellbooks
 let gNumSpawned = 0;
 let gNeedSpawn = 100;
 let createdMonster;
