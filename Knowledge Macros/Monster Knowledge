@@ -1,0 +1,373 @@
+/**
+ * Macro 2: Knowledge Check & Interactive Display (Final Stability Fix)
+ * NOTE: Ensure this Macro is set to run as an ASYNC macro in Foundry.
+ */
+
+// 1. Targeting & Validation
+const targets = game.user.targets;
+if (targets.size !== 1) return ui.notifications.warn("Please target exactly one token.");
+const targetActor = targets.first().actor;
+
+// Check if data exists from Macro 1
+const loreData = targetActor.getFlag("world", "monsterLore");
+if (!loreData) return ui.notifications.error("This creature has no specific lore knowledge stored. (GM must run Setup Macro first)");
+
+// Determine Creature Type from "Class"
+const raceClass = targetActor.itemTypes.class[0];
+if (!raceClass) return ui.notifications.error("Target has no Class/Type defined.");
+const typeName = raceClass.name.toLowerCase();
+
+// 2. Skill Mapping (Using your updated abbreviations)
+const SKILL_MAP = {
+    "construct": "kar", "dragon": "kar", "magical beast": "kar",
+    "aberration": "kdu", "ooze": "kdu",
+    "humanoid": "klo",
+    "animal": "kna", "fey": "kna", "monstrous humanoid": "kna", "plant": "kna", "vermin": "kna",
+    "outsider": "kpl",
+    "undead": "kre"
+};
+
+let skillKey = null;
+for (const [key, val] of Object.entries(SKILL_MAP)) {
+    if (typeName.includes(key)) {
+        skillKey = val;
+        break;
+    }
+}
+
+if (!skillKey) return ui.notifications.error(`No knowledge skill mapped for type: ${typeName}`);
+
+// 3. User Character Setup
+const pc = game.user.character;
+if (!pc) return ui.notifications.warn("You must have an assigned character to recall knowledge.");
+
+// --- Safely initialize skill data and ensure number types ---
+let skillBonus = 0;
+let ranks = 0;
+let skillName = CONFIG.PF1.skills[skillKey] || skillKey;
+
+if (pc.system.skills && pc.system.skills[skillKey]) {
+    const sk = pc.system.skills[skillKey];
+    skillBonus = Number(sk.mod);
+    ranks = Number(sk.rank);
+} else {
+    const abilityKey = CONFIG.PF1.skillAbilities?.[skillKey] || "int"; 
+    skillBonus = Number(pc.system.abilities[abilityKey]?.mod || 0);
+}
+
+const requiresTraining = true; 
+
+// 4. Calculate DC (Needed before history check)
+const cr = Number(targetActor.system.details.cr?.total || 0); 
+let dcMod = 0;
+
+if (targetActor.items.find(i => i.name === "Common")) dcMod = -5;
+else if (targetActor.items.find(i => i.name === "Rare")) dcMod = 5;
+
+const dc = 10 + cr + dcMod;
+
+// 5. Check Previous Attempts
+const flagKey = `knowledge_${targetActor.id}`;
+const previousAttempt = pc.getFlag("world", flagKey); // Use flat flag key
+
+if (previousAttempt) {
+    if (skillBonus <= previousAttempt.bonus) {
+        ui.notifications.warn(`You recall your previous study of this creature...`);
+        // Use the saved roll total and history to reconstruct the dialog
+        await showKnowledgeDialog(previousAttempt.rollTotal, previousAttempt.dc, loreData, targetActor, previousAttempt.chosenOptions);
+        return;
+    }
+}
+
+// 6. Calculate Roll (New Roll)
+let rollTotal = 0; 
+
+// Use async evaluate() with await. 
+const d20 = Number((await new Roll("1d20").evaluate()).total); 
+
+if (ranks === 0 && requiresTraining) {
+    rollTotal = Math.min(10, d20 + skillBonus);
+} else {
+    rollTotal = d20 + skillBonus;
+}
+
+// 7. Save Attempt
+// If shouldSave is true, we must initialize chosenOptions
+const shouldSave = !previousAttempt || (rollTotal > previousAttempt.rollTotal) || (skillBonus > previousAttempt.bonus);
+
+// Initialize options for a new roll, or reuse old options if the new roll is worse
+const chosenOptions = previousAttempt && !shouldSave ? previousAttempt.chosenOptions : {
+    margin: rollTotal - dc,
+    questions: Math.floor((rollTotal - dc) / 5),
+    revealed: [],
+    freeAbilityUsed: false
+};
+
+if (shouldSave && !isNaN(rollTotal)) {
+    await pc.setFlag("world", flagKey, {
+        bonus: skillBonus,
+        rollTotal: rollTotal,
+        dc: dc,
+        chosenOptions: chosenOptions // Save the initial state
+    });
+}
+
+// 8. Display Output
+const finalTotal = (shouldSave || !previousAttempt) ? rollTotal : previousAttempt.rollTotal;
+
+if (isNaN(finalTotal)) {
+    ui.notifications.error("Failed to calculate roll total. Please check actor data.");
+    return;
+}
+
+await showKnowledgeDialog(finalTotal, dc, loreData, targetActor, chosenOptions);
+
+// --- Helper function to update the flag history ---
+async function saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey) {
+    const currentAttempt = pc.getFlag("world", flagKey);
+    if (currentAttempt) {
+        await pc.setFlag("world", flagKey, {
+            ...currentAttempt,
+            chosenOptions: {
+                // Keep margin and roll total from the original roll
+                margin: currentAttempt.margin || (currentAttempt.rollTotal - currentAttempt.dc),
+                questions: remaining,
+                revealed: revealed,
+                freeAbilityUsed: freeAbilityUsed 
+            }
+        });
+    }
+}
+
+
+// --- Function to Render the Dialog (FIX APPLIED HERE) ---
+async function showKnowledgeDialog(total, dc, data, target, history = {revealed: [], questions: 0, freeAbilityUsed: false}) {
+    total = Number(total); 
+    const margin = total - dc;
+    let content = "";
+    
+    const canSeeBasic = total >= dc;
+    let initialQuestionsAllowed = Math.floor(margin / 5);
+
+    // Initial state setup based on history
+    let revealed = history.revealed || [];
+    let freeAbilityUsed = history.freeAbilityUsed || false;
+    
+    // Use the saved history.questions count, as it was correctly deducted in the previous session/clicks.
+    let questionsRemaining = history.questions; 
+    
+    // Ensure questions remaining doesn't go below zero
+    questionsRemaining = Math.max(0, questionsRemaining);
+    
+    // HTML Construction
+    content += `<div style="margin-bottom: 10px; font-size: 1.1em;"><strong>Check Result:</strong> ${total} (DC ${dc})</div>`;
+    content += `<hr>`;
+    
+    // 1. Appearance
+    if (total < dc) {
+         content += `<h3>Appearance</h3><div class="lore-section">${data.appearance}</div>`;
+         content += `<p><em>You fail to recall specific details about this creature.</em></p>`;
+    }
+
+    // 2. Basic Info
+    if (canSeeBasic) {
+        content += `<h3>Basic Information</h3>`;
+        content += `<ul>
+            <li><strong>Name:</strong> ${data.basic.name}</li>
+            <li><strong>Type:</strong> ${data.basic.type}</li>
+            <li><strong>Alignment:</strong> ${data.basic.alignment}</li>
+        </ul>`;
+        content += `<div class="lore-section">${data.basic.desc}</div>`;
+    }
+
+    // 3. Interactive Section
+    if (initialQuestionsAllowed > 0 && canSeeBasic) {
+        content += `<hr><h3>Deep Knowledge</h3>`;
+        content += `<p>You may reveal <strong><span id="q-count">${questionsRemaining}</span></strong> more pieces of information.</p>`;
+        
+        // Add previously revealed info to the output initially
+        const initialOutput = revealed.map(item => {
+            const title = item.title;
+            const infoHtml = item.desc;
+            const style = item.free ? 'style="color: green; font-weight: bold;"' : '';
+            return `<div class="lore-entry" ${style}><h4>${title}</h4><div>${infoHtml}</div><hr></div>`;
+        }).join('');
+        
+        content += `<div id="lore-output" style="max-height: 300px; overflow-y: auto; border: 1px solid #333; padding: 5px; background: rgba(0,0,0,0.1);">
+            ${initialOutput}
+        </div>`;
+
+        content += `<div id="lore-buttons" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">`;
+        
+        const buttons = [];
+        if (data.fullDesc) buttons.push({id: "fullDesc", label: "Full Description"});
+        
+        buttons.push(
+            {id: "senses", label: "Senses"},
+            {id: "defenses", label: "Weaknesses/Resist"},
+            {id: "feats", label: "Feats"},
+            {id: "skills", label: "Skills"},
+            {id: "spells", label: "Spells/SLAs"},
+            {id: "stats", label: "Stats"},
+            {id: "ecology", label: "Ecology/Lang"}
+        );
+        
+        const abilityListRevealed = revealed.some(r => r.type === 'abilities'); // Check the main 'abilities' key
+        if (!abilityListRevealed) {
+             buttons.push({id: "abilities", label: "Abilities"}); // Reverting to original 'abilities' ID
+        }
+
+        buttons.forEach(b => {
+            content += `<button class="lore-btn" data-type="${b.id}" style="width: auto; flex-grow: 1;" ${revealed.some(r => r.id === b.id) ? 'disabled style="opacity: 0.5;"' : ''}>${b.label}</button>`;
+        });
+        
+        content += `</div>`;
+    }
+
+    // Render Dialog
+    new Dialog({
+        title: `Knowledge: ${target.name} (${skillName})`,
+        content: content,
+        buttons: {
+            close: { label: "Close" }
+        },
+        render: (html) => {
+            if (initialQuestionsAllowed <= 0 || !canSeeBasic) return;
+
+            let remaining = questionsRemaining;
+            let freeAbilityAvailable = !freeAbilityUsed; // Initialize based on saved history
+
+            const btnContainer = html.find("#lore-buttons");
+            const output = html.find("#lore-output");
+            const countSpan = html.find("#q-count");
+            
+            // Function to generate and insert the ability sub-buttons
+            const generateAbilityButtons = () => {
+                 html.find("button[data-type='abilities']").remove(); // Remove main button
+                 data.abilities.forEach((ab, idx) => {
+                    const id = `ability-${idx}`;
+                    const isDisabled = revealed.some(r => r.id === id); 
+                    
+                    const subBtn = $(`<button class="ability-sub-btn" data-idx="${idx}" style="width: auto; margin: 2px; background: #4a2b2b; color: white;" ${isDisabled ? 'disabled style="opacity: 0.5;"' : ''}>${ab.name}</button>`);
+                    btnContainer.append(subBtn);
+                 });
+                 if (freeAbilityAvailable && data.abilities.length > 0) {
+                      output.prepend(`<p style="color: green; font-weight: bold;">(First ability detail selection is FREE)</p><hr>`);
+                 }
+                 
+                 // If no questions remain AND the free ability has been used, disable all ability sub-buttons
+                 if (remaining <= 0 && !freeAbilityAvailable) {
+                      html.find(".ability-sub-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
+                 }
+            };
+            
+            // If ability list was revealed in history, generate sub-buttons immediately
+            if (revealed.some(r => r.type === 'abilities')) {
+                generateAbilityButtons();
+            }
+
+            // Main Button Click Listener
+            html.on("click", ".lore-btn, .ability-sub-btn", async (event) => {
+                const btn = $(event.currentTarget);
+                const type = btn.data("type");
+                let isAbilitySub = btn.hasClass("ability-sub-btn");
+                
+                let cost = 1;
+                let revealedId = type;
+                let infoHtml = "";
+                let title = "";
+                let isFree = false;
+
+                // 1. Handle "Abilities" Button: Reveals sub-buttons, does NOT cost a question
+                if (type === "abilities" && !isAbilitySub) {
+                    cost = 0; // Revealing the list is free
+                    title = "Special Abilities List";
+                    infoHtml = `<p>The creature has ${data.abilities.length} special abilities. Click a button below to learn the details of one. The first detail chosen is FREE.</p>`;
+                    revealedId = 'abilities'; // Using the main ID to mark the list as revealed
+                    
+                    // Add to revealed history (with cost=0)
+                    revealed.push({ id: revealedId, type: 'abilities', title: title, desc: infoHtml, cost: cost, free: isFree });
+
+                    // Generate sub-buttons and disable the list button
+                    generateAbilityButtons();
+                    btn.prop("disabled", true).css("opacity", 0.5);
+                    output.prepend(`<div class="lore-entry"><h4>${title}</h4><div>${infoHtml}</div><hr></div>`);
+                    
+                    // Save the new history state
+                    await saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey);
+                    return;
+                }
+
+                // 2. Handle Specific Ability Detail Sub-Button (This is where the cost logic is fixed)
+                if (isAbilitySub) {
+                    const idx = btn.data("idx");
+                    title = data.abilities[idx].name;
+                    infoHtml = data.abilities[idx].desc;
+                    revealedId = `ability-${idx}`;
+                    
+                    // COST LOGIC FIX: Determine cost first.
+                    if (freeAbilityAvailable) {
+                        cost = 0;
+                        isFree = true;
+                        // IMPORTANT: Mark the free use flag immediately for history tracking
+                        freeAbilityUsed = true; 
+                        freeAbilityAvailable = false; // Disable local free use flag
+                        output.prepend(`<p style="color: green; font-size: 0.8em;">(${title} revealed for free - Free Choice Used)</p>`);
+                    } else {
+                        // If free use is NOT available, cost is 1. Check remaining questions.
+                        if (remaining <= 0) {
+                            ui.notifications.warn("No questions remaining, and free ability choice already used.");
+                            return;
+                        }
+                        cost = 1;
+                    }
+                } else {
+                    // 3. Handle Regular Button (FullDesc, Senses, etc.)
+                    if (remaining <= 0) {
+                         ui.notifications.warn("No questions remaining.");
+                         return;
+                    }
+                    title = btn.text();
+                    infoHtml = data[type];
+                    cost = 1;
+                }
+                
+                // --- Execution and Save ---
+                
+                // Update Counter (Only if cost > 0)
+                if (cost > 0) {
+                    remaining -= cost;
+                    countSpan.text(remaining);
+                }
+                
+                // Add to revealed history
+                revealed.push({
+                    id: revealedId,
+                    type: isAbilitySub ? 'ability-sub' : type,
+                    title: title,
+                    desc: infoHtml,
+                    // Storing cost and free status for accurate history display/reload
+                    cost: cost, 
+                    free: isFree
+                });
+
+                // Save the new history state
+                await saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey);
+
+                // Append info and disable button
+                output.prepend(`<div class="lore-entry" ${isFree ? 'style="color: green; font-weight: bold;"' : ''}><h4>${title}</h4><div>${infoHtml}</div><hr></div>`);
+                btn.prop("disabled", true).css("opacity", 0.5);
+
+                if (remaining <= 0) {
+                     // Disable all remaining paid buttons
+                     html.find(".lore-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
+                     
+                     // If the free ability was used, disable the sub-buttons too
+                     if (!freeAbilityAvailable) {
+                          html.find(".ability-sub-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
+                     }
+                }
+            });
+        }
+    }).render(true);
+}
