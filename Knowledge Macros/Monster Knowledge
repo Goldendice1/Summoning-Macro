@@ -11,7 +11,6 @@ const targetActor = targets.first().actor;
 // Check if data exists from Macro 1
 const loreData = targetActor.getFlag("world", "monsterLore");
 if (!loreData) return ui.notifications.error("This creature has no specific lore knowledge stored. (GM must run Setup Macro first)");
-
 // Determine Creature Type from "Class"
 const raceClass = targetActor.itemTypes.class[0];
 if (!raceClass) return ui.notifications.error("Target has no Class/Type defined.");
@@ -26,7 +25,6 @@ const SKILL_MAP = {
     "outsider": "kpl",
     "undead": "kre"
 };
-
 let skillKey = null;
 for (const [key, val] of Object.entries(SKILL_MAP)) {
     if (typeName.includes(key)) {
@@ -40,40 +38,43 @@ if (!skillKey) return ui.notifications.error(`No knowledge skill mapped for type
 // 3. User Character Setup
 const pc = game.user.character;
 if (!pc) return ui.notifications.warn("You must have an assigned character to recall knowledge.");
-
 // --- Safely initialize skill data and ensure number types ---
 let skillBonus = 0;
 let ranks = 0;
 let skillName = CONFIG.PF1.skills[skillKey] || skillKey;
+// Abbreviate the leading word "Knowledge" to "Kn" (e.g. "Knowledge (Arcana)" -> "Kn (Arcana)")
+if (typeof skillName === 'string') {
+    skillName = skillName.replace(/\bKnowledge\b/i, 'Kn');
+}
 
 if (pc.system.skills && pc.system.skills[skillKey]) {
     const sk = pc.system.skills[skillKey];
     skillBonus = Number(sk.mod);
     ranks = Number(sk.rank);
 } else {
-    const abilityKey = CONFIG.PF1.skillAbilities?.[skillKey] || "int"; 
+    const abilityKey = CONFIG.PF1.skillAbilities?.[skillKey] || "int";
     skillBonus = Number(pc.system.abilities[abilityKey]?.mod || 0);
 }
 
 const requiresTraining = true; 
 
 // 4. Calculate DC (Needed before history check)
-const cr = Number(targetActor.system.details.cr?.total || 0); 
+const cr = Number(targetActor.system.details.cr?.total || 0);
 let dcMod = 0;
 
 if (targetActor.items.find(i => i.name === "Common")) dcMod = -5;
 else if (targetActor.items.find(i => i.name === "Rare")) dcMod = 5;
 
 const dc = 10 + cr + dcMod;
-
 // 5. Check Previous Attempts
 const flagKey = `knowledge_${targetActor.id}`;
-const previousAttempt = pc.getFlag("world", flagKey); // Use flat flag key
+const previousAttempt = pc.getFlag("world", flagKey);
+// Use flat flag key
 
 if (previousAttempt) {
     if (skillBonus <= previousAttempt.bonus) {
         ui.notifications.warn(`You recall your previous study of this creature...`);
-        // Use the saved roll total and history to reconstruct the dialog
+// Use the saved roll total and history to reconstruct the dialog
         await showKnowledgeDialog(previousAttempt.rollTotal, previousAttempt.dc, loreData, targetActor, previousAttempt.chosenOptions);
         return;
     }
@@ -82,7 +83,7 @@ if (previousAttempt) {
 // 6. Calculate Roll (New Roll)
 let rollTotal = 0; 
 
-// Use async evaluate() with await. 
+// Use async evaluate() with await.
 const d20 = Number((await new Roll("1d20").evaluate()).total); 
 
 if (ranks === 0 && requiresTraining) {
@@ -93,16 +94,17 @@ if (ranks === 0 && requiresTraining) {
 
 // 7. Save Attempt
 // If shouldSave is true, we must initialize chosenOptions
-const shouldSave = !previousAttempt || (rollTotal > previousAttempt.rollTotal) || (skillBonus > previousAttempt.bonus);
+const shouldSave = !previousAttempt || (rollTotal > previousAttempt.rollTotal) ||
+(skillBonus > previousAttempt.bonus);
 
 // Initialize options for a new roll, or reuse old options if the new roll is worse
-const chosenOptions = previousAttempt && !shouldSave ? previousAttempt.chosenOptions : {
+const chosenOptions = previousAttempt && !shouldSave ?
+previousAttempt.chosenOptions : {
     margin: rollTotal - dc,
     questions: Math.floor((rollTotal - dc) / 5),
     revealed: [],
     freeAbilityUsed: false
 };
-
 if (shouldSave && !isNaN(rollTotal)) {
     await pc.setFlag("world", flagKey, {
         bonus: skillBonus,
@@ -114,7 +116,6 @@ if (shouldSave && !isNaN(rollTotal)) {
 
 // 8. Display Output
 const finalTotal = (shouldSave || !previousAttempt) ? rollTotal : previousAttempt.rollTotal;
-
 if (isNaN(finalTotal)) {
     ui.notifications.error("Failed to calculate roll total. Please check actor data.");
     return;
@@ -131,6 +132,7 @@ async function saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey) {
             chosenOptions: {
                 // Keep margin and roll total from the original roll
                 margin: currentAttempt.margin || (currentAttempt.rollTotal - currentAttempt.dc),
+                
                 questions: remaining,
                 revealed: revealed,
                 freeAbilityUsed: freeAbilityUsed 
@@ -142,7 +144,7 @@ async function saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey) {
 
 // --- Function to Render the Dialog (FIX APPLIED HERE) ---
 async function showKnowledgeDialog(total, dc, data, target, history = {revealed: [], questions: 0, freeAbilityUsed: false}) {
-    total = Number(total); 
+    total = Number(total);
     const margin = total - dc;
     let content = "";
     
@@ -159,25 +161,45 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
     // Ensure questions remaining doesn't go below zero
     questionsRemaining = Math.max(0, questionsRemaining);
     
-    // HTML Construction
-    content += `<div style="margin-bottom: 10px; font-size: 1.1em;"><strong>Check Result:</strong> ${total} (DC ${dc})</div>`;
-    content += `<hr>`;
+    // 📢 NEW: Handle Obscured Knowledge/DC on Failed Check
+    let dialogTitle = "";
+    let headerContent = "";
     
-    // 1. Appearance
+    if (canSeeBasic) {
+        dialogTitle = `${skillName}: ${target.name}`;
+        headerContent = `<div style="margin-bottom: 10px; font-size: 1.1em;"><strong>Check Result:</strong> ${total} (DC ${dc})</div><hr>`;
+    } else {
+        // Obscure skill name and DC on failure
+        dialogTitle = `Knowledge Check Failed`;
+        headerContent = `<div style="margin-bottom: 10px; font-size: 1.1em;"><strong>Check Result:</strong> ${total}</div><hr>`;
+    }
+
+    content += headerContent;
+
+    // 1. Appearance (Only shown on failure for simple description)
     if (total < dc) {
          content += `<h3>Appearance</h3><div class="lore-section">${data.appearance}</div>`;
          content += `<p><em>You fail to recall specific details about this creature.</em></p>`;
     }
 
-    // 2. Basic Info
+    // 2. Basic Info (Combined appearance + first paragraph on success)
     if (canSeeBasic) {
-        content += `<h3>Basic Information</h3>`;
+        const fullDescRevealed = revealed.some(r => r.id === 'fullDesc');
+        
+        // 📢 NEW: Wrap Basic Info in a targetable div
+        content += `<div id="lore-basic-info-wrapper">`; 
+        content += `<h3 id="basic-info-header">${fullDescRevealed ? 'Full Description' : 'Basic Information'}</h3>`;
         content += `<ul>
             <li><strong>Name:</strong> ${data.basic.name}</li>
             <li><strong>Type:</strong> ${data.basic.type}</li>
             <li><strong>Alignment:</strong> ${data.basic.alignment}</li>
         </ul>`;
-        content += `<div class="lore-section">${data.basic.desc}</div>`;
+        
+        // Use combined basic + full description if fullDesc was already revealed
+        const descriptionText = fullDescRevealed ? data.basic.desc + data.fullDesc : data.basic.desc;
+        
+        content += `<div id="basic-info-desc" class="lore-section">${descriptionText}</div>`;
+        content += `</div>`; // Close wrapper
     }
 
     // 3. Interactive Section
@@ -185,21 +207,26 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
         content += `<hr><h3>Deep Knowledge</h3>`;
         content += `<p>You may reveal <strong><span id="q-count">${questionsRemaining}</span></strong> more pieces of information.</p>`;
         
-        // Add previously revealed info to the output initially
-        const initialOutput = revealed.map(item => {
-            const title = item.title;
-            const infoHtml = item.desc;
-            const style = item.free ? 'style="color: green; font-weight: bold;"' : '';
-            return `<div class="lore-entry" ${style}><h4>${title}</h4><div>${infoHtml}</div><hr></div>`;
+        // Add previously revealed info to the output initially (excluding fullDesc, since it modifies the basic section)
+        const initialOutput = revealed
+            .filter(item => item.id !== 'fullDesc')
+            .map(item => {
+                const title = item.title;
+                const infoHtml = item.desc;
+                const style = item.free ? 'style="color: green; font-weight: bold;"' : '';
+                return `<div class="lore-entry" ${style}><h4>${title}</h4><div>${infoHtml}</div><hr></div>`;
         }).join('');
         
+        // Use a wrapper box for standard revelations
         content += `<div id="lore-output" style="max-height: 300px; overflow-y: auto; border: 1px solid #333; padding: 5px; background: rgba(0,0,0,0.1);">
             ${initialOutput}
         </div>`;
+        
 
         content += `<div id="lore-buttons" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">`;
         
         const buttons = [];
+        // Full Description is kept in the button list
         if (data.fullDesc) buttons.push({id: "fullDesc", label: "Full Description"});
         
         buttons.push(
@@ -211,25 +238,27 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
             {id: "stats", label: "Stats"},
             {id: "ecology", label: "Ecology/Lang"}
         );
-        
         const abilityListRevealed = revealed.some(r => r.type === 'abilities'); // Check the main 'abilities' key
         if (!abilityListRevealed) {
-             buttons.push({id: "abilities", label: "Abilities"}); // Reverting to original 'abilities' ID
+             buttons.push({id: "abilities", label: "Abilities"});
         }
 
         buttons.forEach(b => {
             content += `<button class="lore-btn" data-type="${b.id}" style="width: auto; flex-grow: 1;" ${revealed.some(r => r.id === b.id) ? 'disabled style="opacity: 0.5;"' : ''}>${b.label}</button>`;
         });
-        
         content += `</div>`;
     }
 
     // Render Dialog
     new Dialog({
-        title: `Knowledge: ${target.name} (${skillName})`,
+        title: dialogTitle, // Use dynamic title
         content: content,
         buttons: {
             close: { label: "Close" }
+        },
+        // 📢 NEW: Increase Dialog Width
+        options: {
+            width: 900
         },
         render: (html) => {
             if (initialQuestionsAllowed <= 0 || !canSeeBasic) return;
@@ -241,13 +270,18 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
             const output = html.find("#lore-output");
             const countSpan = html.find("#q-count");
             
+            // 📢 NEW: Targetable description elements
+            const basicInfoHeader = html.find("#basic-info-header");
+            const basicInfoDesc = html.find("#basic-info-desc");
+            
+           
             // Function to generate and insert the ability sub-buttons
             const generateAbilityButtons = () => {
                  html.find("button[data-type='abilities']").remove(); // Remove main button
                  data.abilities.forEach((ab, idx) => {
                     const id = `ability-${idx}`;
-                    const isDisabled = revealed.some(r => r.id === id); 
-                    
+          
+                    const isDisabled = revealed.some(r => r.id === id);
                     const subBtn = $(`<button class="ability-sub-btn" data-idx="${idx}" style="width: auto; margin: 2px; background: #4a2b2b; color: white;" ${isDisabled ? 'disabled style="opacity: 0.5;"' : ''}>${ab.name}</button>`);
                     btnContainer.append(subBtn);
                  });
@@ -260,7 +294,6 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
                       html.find(".ability-sub-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
                  }
             };
-            
             // If ability list was revealed in history, generate sub-buttons immediately
             if (revealed.some(r => r.type === 'abilities')) {
                 generateAbilityButtons();
@@ -271,23 +304,75 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
                 const btn = $(event.currentTarget);
                 const type = btn.data("type");
                 let isAbilitySub = btn.hasClass("ability-sub-btn");
-                
+         
                 let cost = 1;
                 let revealedId = type;
                 let infoHtml = "";
                 let title = "";
                 let isFree = false;
-
+                
+                
+                // 📢 NEW: Handle Full Description Click (Logic modified to update Basic Info section)
+                if (type === "fullDesc") {
+                    if (remaining <= 0) {
+                         ui.notifications.warn("No questions remaining.");
+                         return;
+                    }
+                    
+                    // 1. Update Counter
+                    remaining -= 1;
+                    countSpan.text(remaining);
+                    
+                    // 2. Modify Basic Info Section HTML
+                    if (basicInfoDesc.length) {
+                        // Append the full description text to the existing basic description block
+                        basicInfoDesc.append(data.fullDesc);
+                        
+                        // Rename the header
+                        basicInfoHeader.text("Full Description");
+                        
+                        // Add a separator/note in the output box for history/reference
+                        output.prepend(`<div class="lore-entry" style="color: purple;"><h4>Full Description Revealed!</h4><div>The Basic Information section above has been updated to include the full lore text.</div><hr></div>`);
+                    }
+                    
+                    title = "Full Description";
+                    infoHtml = "Description expanded in Basic Information section.";
+                    cost = 1;
+                    
+                    // Add to revealed history
+                    revealed.push({
+                        id: revealedId, // which is "fullDesc"
+                        type: type,
+                        title: title,
+                        desc: infoHtml,
+                        cost: cost, 
+                        free: isFree // isFree is false here
+                    });
+                    
+                    // Save history and disable button
+                    await saveHistory(remaining, revealed, freeAbilityUsed, pc, flagKey);
+                    btn.prop("disabled", true).css("opacity", 0.5);
+                    
+                    if (remaining <= 0) {
+                        // Disable all remaining paid buttons
+                        html.find(".lore-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
+                        // If the free ability was used, disable the sub-buttons too
+                        if (!freeAbilityAvailable) {
+                             html.find(".ability-sub-btn:not([disabled])").prop("disabled", true).css("opacity", 0.5);
+                        }
+                    }
+                    return; // EXIT HERE to prevent running standard button logic
+                }
+                
                 // 1. Handle "Abilities" Button: Reveals sub-buttons, does NOT cost a question
                 if (type === "abilities" && !isAbilitySub) {
                     cost = 0; // Revealing the list is free
                     title = "Special Abilities List";
                     infoHtml = `<p>The creature has ${data.abilities.length} special abilities. Click a button below to learn the details of one. The first detail chosen is FREE.</p>`;
-                    revealedId = 'abilities'; // Using the main ID to mark the list as revealed
+                    revealedId = 'abilities';
                     
                     // Add to revealed history (with cost=0)
                     revealed.push({ id: revealedId, type: 'abilities', title: title, desc: infoHtml, cost: cost, free: isFree });
-
                     // Generate sub-buttons and disable the list button
                     generateAbilityButtons();
                     btn.prop("disabled", true).css("opacity", 0.5);
@@ -310,7 +395,7 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
                         cost = 0;
                         isFree = true;
                         // IMPORTANT: Mark the free use flag immediately for history tracking
-                        freeAbilityUsed = true; 
+                        freeAbilityUsed = true;
                         freeAbilityAvailable = false; // Disable local free use flag
                         output.prepend(`<p style="color: green; font-size: 0.8em;">(${title} revealed for free - Free Choice Used)</p>`);
                     } else {
@@ -322,7 +407,7 @@ async function showKnowledgeDialog(total, dc, data, target, history = {revealed:
                         cost = 1;
                     }
                 } else {
-                    // 3. Handle Regular Button (FullDesc, Senses, etc.)
+                    // 3. Handle Regular Button (Senses, Defenses, etc.)
                     if (remaining <= 0) {
                          ui.notifications.warn("No questions remaining.");
                          return;

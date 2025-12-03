@@ -1,5 +1,5 @@
 /**
- * Macro 1: Monster Knowledge Data Harvester (Final Subtype Property Fix)
+ * Macro 1: Monster Knowledge Data Harvester (Parenthetical Fix)
  * Stores lore data on the SOURCE ACTOR (Sidebar) so it applies to all tokens.
  */
 
@@ -10,14 +10,14 @@ if (controlledTokens.length !== 1) {
 
 const token = controlledTokens[0];
 
-// Get the Source Actor from the sidebar to ensure data is shared across all copies
+// Get the Source Actor from the sidebar
 const actor = game.actors.get(token.document.actorId);
 
 if (!actor) {
     return ui.notifications.error("Could not find the source actor for this token. Is it a temporary token without a sheet?");
 }
 
-// --- Helper: Parse Description Trait (No Change) ---
+// --- Helper: Parse Description Trait ---
 function parseDescriptionTrait(traitName) {
     const item = actor.items.find(i => i.name === traitName);
     if (!item) return { appearance: "", basic: "", full: "" };
@@ -53,24 +53,23 @@ function parseDescriptionTrait(traitName) {
             fullDesc += p.outerHTML;
         }
     }
+    
+    // Combine appearance and the initial basic description.
+    const combinedBasic = appearance + basicDesc;
 
-    return { appearance, basic: basicDesc, full: fullDesc };
+    return { appearance, basic: combinedBasic, full: fullDesc };
 }
 
-// --- Helper: List Trait Formatting (Immunities, Vulnerabilities, Languages) (No Change) ---
+// --- Helper: List Trait Formatting ---
 function formatListTrait(trait, labelMap) {
     if (!trait) return [];
     
     const map = labelMap || {};
-    
     let value = [];
     
-    // Prioritize language total if present
     if (trait.total) { 
         value = (trait.total instanceof Set) ? Array.from(trait.total) : (Array.isArray(trait.total) ? trait.total : []);
-    }
-    // Check general value field
-    else if (Array.isArray(trait.value)) {
+    } else if (Array.isArray(trait.value)) {
         value = trait.value;
     } else if (trait.value instanceof Set) {
         value = Array.from(trait.value);
@@ -88,7 +87,7 @@ function formatListTrait(trait, labelMap) {
     return list.join(", ");
 }
 
-// --- Helper: Structured Resistance Formatting (DR, ERes) (No Change) ---
+// --- Helper: Structured Resistance Formatting ---
 function formatResistance(trait) {
     const resistances = Array.isArray(trait.value) ? trait.value : [];
     if (resistances.length === 0) return null;
@@ -97,9 +96,7 @@ function formatResistance(trait) {
 
     return resistances.map(t => {
         const amt = t.amount || 0;
-        
         const typesArray = Array.isArray(t.types) ? t.types : [];
-        
         const mappedTypes = typesArray.map(typeKey => damageMap[typeKey] || typeKey).join(" and ");
 
         if (amt === 0) return null; 
@@ -122,13 +119,25 @@ const typeName = raceClass ? raceClass.name : "Unknown";
 // 2. Senses
 const perception = actor.system.skills.per.mod;
 const traits = actor.system.traits;
+const sData = traits.senses || {};
 const sensesArray = [];
 
-if (traits.senses.blindsight) sensesArray.push(`Blindsight ${traits.senses.blindsight} ft.`);
-if (traits.senses.darkvision) sensesArray.push(`Darkvision ${traits.senses.darkvision} ft.`);
-if (traits.senses.lowLightVision) sensesArray.push(`Low-Light Vision`);
+// Range-based senses (check > 0)
+if (sData.bs?.total > 0) sensesArray.push(`Blindsight ${sData.bs.total} ft.`);
+if (sData.bse?.total > 0) sensesArray.push(`Blindsense ${sData.bse.total} ft.`);
+if (sData.dv?.total > 0) sensesArray.push(`Darkvision ${sData.dv.total} ft.`);
+if (sData.ls?.total > 0) sensesArray.push(`Lifesense ${sData.ls.total} ft.`);
+if (sData.sc?.total > 0) sensesArray.push(`Scent ${sData.sc.total} ft.`);
+if (sData.tr?.total > 0) sensesArray.push(`Tremorsense ${sData.tr.total} ft.`);
+if (sData.ts?.total > 0) sensesArray.push(`True Seeing ${sData.ts.total} ft.`);
 
-if (traits.senses.custom) sensesArray.push(traits.senses.custom);
+// Boolean/Enabled senses (check for truthy value)
+if (sData.ll?.enabled) sensesArray.push(`Low-Light Vision`);
+if (sData.si) sensesArray.push(`See Invisibility`);
+if (sData.sid) sensesArray.push(`See in Darkness`);
+
+// Custom string
+if (sData.custom) sensesArray.push(sData.custom);
 
 const sensesCombined = sensesArray.join(", ") || "None";
 
@@ -136,50 +145,37 @@ const sensesCombined = sensesArray.join(", ") || "None";
 // 3. Weaknesses / Resistances
 const defensesArray = [];
 
-// DR (Structured)
 if (traits.dr) {
     const drList = formatResistance(traits.dr);
     if (drList) defensesArray.push(`DR: ${drList}`);
 }
-
-// Energy Resistance (Structured)
 if (traits.eres) {
     const eresList = formatResistance(traits.eres);
     if (eresList) defensesArray.push(`Energy Res: ${eresList}`);
 }
-
-// Condition Resistance (Often text or list)
 if (traits.cres) {
     const cresText = typeof traits.cres === 'string' ? traits.cres : (traits.cres.value || "");
     if (cresText) defensesArray.push(`Condition Res: ${cresText}`);
 }
-
-// Condition Immunities (List)
 if (traits.ci) {
     const ciList = formatListTrait(traits.ci, CONFIG.PF1.conditionTypes);
     if (ciList) defensesArray.push(`Condition Immunities: ${ciList}`);
 }
-
-// Damage Immunities (List)
 if (traits.di) {
     const diList = formatListTrait(traits.di, CONFIG.PF1.damageTypes);
     if (diList) defensesArray.push(`Damage Immunities: ${diList}`);
 }
-
-// Vulnerabilities (List - Uses Damage Types)
 if (traits.dv) {
     const dvList = formatListTrait(traits.dv, CONFIG.PF1.damageTypes);
     if (dvList) defensesArray.push(`Vulnerabilities: ${dvList}`);
 }
-
-// Regen / Fast Healing
 if (traits.regen) defensesArray.push(`Regeneration: ${traits.regen}`);
 if (traits.fastHealing) defensesArray.push(`Fast Healing: ${traits.fastHealing}`);
 
 const defenses = defensesArray.join("<br>") || "None";
 
 
-// 4. Feats (FIX: Filter specifically for item category 'feat' AND subtype 'feat')
+// 4. Feats
 const featList = actor.items.filter(i => 
     i.type === "feat" && 
     i.subType === "feat"
@@ -198,91 +194,81 @@ const skillList = Object.entries(actor.system.skills)
     .join(", ");
 
 
-// 6. Spells / SLAs (FINAL LOGIC APPLIED HERE)
+// 6. Spells / SLAs
 let spellsAndSlas = "None listed.";
 
 const spellItems = actor.items.filter(i => i.type === 'spell');
 
 if (spellItems.length > 0) {
-    // We only initialize Constant and At Will, all X/day groups will be created dynamically
     const spellGroups = {
         'Constant': [],
         'At will': [],
         'Other': [] 
     };
     
-    // Determine the caster level (CL)
-    let casterLevel = actor.system.attributes.spells?.primary?.cl?.total || 0; 
+    let casterLevel = actor.system.attributes.spells?.spellbooks?.primary?.cl?.total || 0; 
     if (casterLevel === 0) {
         casterLevel = Math.max(1, ...actor.itemTypes.class.map(c => c.system.levels || 0));
     }
     
-    // Iterate through spells and group them
     spellItems.forEach(spell => {
         const uses = spell.system.uses;
-        const name = spell.name;
+        let name = spell.name;
         
         let key = 'Other';
 
-        // 1. CONSTANT: Highest priority check by name convention
+        // 1. CONSTANT
         if (name.toLowerCase().startsWith("constant")) {
              key = 'Constant';
+             name = name.replace(/^Constant:\s*/i, '').trim(); 
         } 
-        // 2. AT WILL: Check for uses.atWill or 'at will' in the usage fields
+        // 2. AT WILL
         else if (spell.system.atWill || uses.value === 'at will' || uses.per === 'at will') {
              key = 'At will';
         }
-        // 3. X/DAY: Check for limited uses per day, deriving max uses from system.uses.max
-        else if (uses && uses.max && uses.per === 'day') {
-            const maxUses = Number(uses.max); // Use uses.max directly
+        // 3. X/DAY (Check uses.max directly)
+        else if (uses && uses.max) {
+            const maxUses = Number(uses.max); 
             if (maxUses > 0) {
-                key = `${maxUses}/day`; // Dynamic key generation
+                key = `${maxUses}/day`;
+                if (!spellGroups[key]) spellGroups[key] = [];
             }
         }
         
-        // Add the spell name to the appropriate group, creating the group if necessary
+        // Add to group
         if (spellGroups[key]) {
             spellGroups[key].push(name);
         } else if (key !== 'Other') {
-             // Dynamic key: create and add (e.g., '5/day')
              spellGroups[key] = [name];
         } else {
-             // Reserve 'Other' for true non-daily or malformed data
              spellGroups['Other'].push(name);
         }
     });
 
-    // Construct the formatted output string
     let spellsOutput = `<strong>Spell-Like Abilities</strong> (CL ${casterLevel}th)<br>`;
 
-    // Define the strict starting order
     const fixedOrder = ['Constant', 'At will'];
     
-    // Collect all present keys that are NOT Constant or At Will
     const dynamicKeys = Object.keys(spellGroups).filter(k => 
         !fixedOrder.includes(k) && 
         k.endsWith('/day') && 
         spellGroups[k].length > 0
     ).sort((a, b) => {
-        // Sort X/day keys in descending order (e.g., 9/day before 1/day)
         const numA = parseInt(a.split('/')[0]);
         const numB = parseInt(b.split('/')[0]);
         return numB - numA;
     });
 
-    // Final order of all non-empty keys
     const sortedKeys = [...fixedOrder, ...dynamicKeys, 'Other'].filter(k => 
         spellGroups[k] && spellGroups[k].length > 0
     );
     
-    // Generate HTML
     sortedKeys.forEach(key => {
-        // Sort the spells within each use category alphabetically
         const spellList = spellGroups[key].sort().join(', ');
         
         let formattedKey = key;
         if (key === 'Other') {
-            formattedKey = 'Variable Uses / Non-Daily';
+            formattedKey = 'Variable Uses';
         }
 
         spellsOutput += `<strong>${formattedKey}</strong>—${spellList}<br>`;
@@ -311,19 +297,28 @@ const ecology = actor.items.find(i => i.name === "Ecology")?.system.description.
 const languages = formatListTrait({total: actor.system.traits.languages?.total}, CONFIG.PF1.languages);
 
 
-// 9. Abilities (Misc Features) (UPDATED NAME CLEANING LOGIC)
+// 9. Abilities (Misc Features)
 const abilitySubtypes = ["racial", "misc"];
 const excludedItemNames = ["Ecology", "Tactics", "Description", "Miscellaneous Notes"];
 
 const miscFeats = actor.items.filter(i => 
-    i.type === "feat" && // Must be the Feat item category
-    abilitySubtypes.includes(i.subType) && // Must have the racial or misc subtype
+    i.type === "feat" && 
+    abilitySubtypes.includes(i.subType) && 
     !excludedItemNames.includes(i.name)
 ).map(i => {
-    // 📢 NEW: Strip content inside parentheses from the name for a cleaner button label
-    const cleanName = i.name.replace(/\s*\([^)]*\)\s*/g, ' ').trim();
-    
-    return { name: cleanName, desc: i.system.description.value };
+    // 📢 NEW: Move parenthetical info to description
+    const parenMatch = i.name.match(/\s*(\([^)]*\))/);
+    let cleanName = i.name;
+    let desc = i.system.description.value;
+
+    if (parenMatch) {
+        // Remove from name
+        cleanName = i.name.replace(parenMatch[0], '').trim();
+        // Add to description (bolded for visibility)
+        desc = `<strong>${parenMatch[1]}</strong><br>${desc}`;
+    }
+
+    return { name: cleanName, desc: desc };
 });
 
 // Construct Data Object
